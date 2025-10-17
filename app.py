@@ -740,56 +740,6 @@ def _resolve_participant_from_registration(reg_data: dict) -> Dict:
             return doc.to_dict()
     return None
 
-
-def _collect_view_participants(selected_dept_id: str = None, selected_event_id: str = None) -> List[Dict]:
-    """Return participants using the same logic/shape as `view_participants`.
-
-    Args:
-        selected_dept_id: department document id (optional)
-        selected_event_id: event name string (optional)
-
-    Returns:
-        List[dict] with keys: name, email, phone, college, branch, year, event_name, dept_name, event_id, transaction_id
-    """
-    parts = []
-    parts_stream = db.collection('participants').stream()
-
-    selected_dept_name = None
-    if selected_dept_id:
-        try:
-            ddoc = db.collection('departments').document(selected_dept_id).get()
-            if ddoc.exists:
-                selected_dept_name = ddoc.to_dict().get('name')
-        except Exception:
-            selected_dept_name = None
-
-    for pdoc in parts_stream:
-        p = pdoc.to_dict() or {}
-        p_dept = p.get('department') or ''
-        p_event = p.get('event') or ''
-        # apply filters if provided
-        if selected_dept_name and p_dept != selected_dept_name:
-            continue
-        if selected_event_id and p_event != selected_event_id:
-            continue
-
-        parts.append({
-            'name': p.get('name', ''),
-            'email': p.get('email', ''),
-            'phone': p.get('phone', ''),
-            'college': p.get('college', ''),
-            'branch': _get_branch(p),
-            'year': p.get('year', ''),
-            'event_name': p_event,
-            'dept_name': p_dept,
-            'event_id': '',
-            'transaction_id': p.get('transactionId') or p.get('transaction_id') or p.get('txid') or p.get('transaction') or ''
-        })
-
-    # sort by dept, event, name to match view
-    parts = sorted(parts, key=lambda r: (r.get('dept_name', ''), r.get('event_name', ''), r.get('name', '') ))
-    return parts
-
 # -------------------- View Participants --------------------
 @app.route('/view_participants', methods=['GET'])
 def view_participants():
@@ -955,44 +905,48 @@ def download_participants():
     if 'username' not in session:
         return redirect(url_for('login'))
 
-    # Accept either 'event' (legacy) or 'event_id' (used by view). Treat both as event name when present.
-    event_name = request.args.get('event') or request.args.get('event_id')
+    event_name = request.args.get('event')
     format_type = request.args.get('format', 'xlsx')
     dept_id = request.args.get('dept_id')
-    
-    print(f"Downloading participants - event: {event_name}, format: {format_type}, dept_id: {dept_id}")
 
-    # Previously we required either an event or a department filter to avoid exporting the entire database.
-    # Allow exporting all participants when no filter is provided — users requested full exports.
+    # Require either an event or a department filter to avoid exporting the entire database
+    if not event_name and not dept_id:
+        return Response('Please select a department or an event before downloading.', status=400)
 
-    # Collect participants using the same logic as the view so exports match the table
+    # Allow exporting all events when event_name is not provided
+    participants = []
     try:
-        participants = _collect_view_participants(selected_dept_id=dept_id, selected_event_id=event_name)
+        # Build query respecting department and event filters
+        q = db.collection('participants')
+        if dept_id:
+            # resolve department name if possible
+            try:
+                ddoc = db.collection('departments').document(dept_id).get()
+                if ddoc.exists:
+                    dept_name = ddoc.to_dict().get('name')
+                else:
+                    dept_name = dept_id
+            except Exception:
+                dept_name = dept_id
+            q = q.where('department', '==', dept_name)
+        if event_name:
+            q = q.where('event', '==', event_name)
+
+        for doc in q.stream():
+            data = doc.to_dict() or {}
+            participants.append({
+                'name': data.get('name', ''),
+                'event': data.get('event', ''),
+                'college': data.get('college', ''),
+                'branch': _get_branch(data),
+                'year': data.get('year', ''),
+                'email': data.get('email', ''),
+                'phone': data.get('phone', ''),
+                # robust transaction id lookup
+                'transaction_id': data.get('transactionId') or data.get('transaction_id') or data.get('txid') or data.get('transaction') or ''
+            })
     except Exception as e:
         return str(e), 500
-
-    # Debugging: show how many participants were fetched and a small sample to help diagnose empty exports
-    try:
-        print(f"Participants fetched for export: {len(participants)}")
-        for i, samp in enumerate(participants[:3]):
-            print(f" Sample {i+1}: name={samp.get('name')!r}, email={samp.get('email')!r}, event={samp.get('event_name') or samp.get('event')!r}")
-    except Exception:
-        # ignore any logging errors
-        pass
-
-    # If no participants were found, include a placeholder row so the exported file isn't completely empty
-    if not participants:
-        print("No participants found for selected filters — adding placeholder row to export.")
-        participants = [{
-            'name': 'No participants found',
-            'event_name': '',
-            'college': '',
-            'branch': '',
-            'year': '',
-            'email': '',
-            'phone': '',
-            'transaction_id': ''
-        }]
 
     # Column order should match the page exactly
     export_headers = ['Name', 'Event', 'College', 'Branch', 'Year', 'Email', 'Phone', 'Transaction ID']
@@ -1013,7 +967,7 @@ def download_participants():
             for row_idx, p in enumerate(participants, start=2):
                 row_vals = [
                     p.get('name', ''),
-                    p.get('event_name', ''),
+                    p.get('event', ''),
                     p.get('college', ''),
                     p.get('branch', ''),
                     p.get('year', ''),
@@ -1070,7 +1024,7 @@ def download_participants():
             for p in participants:
                 row = [
                     p.get('name', ''),
-                    p.get('event_name', ''),
+                    p.get('event', ''),
                     p.get('college', ''),
                     p.get('branch', ''),
                     p.get('year', ''),
@@ -1162,11 +1116,8 @@ def export_participants():
     Query params: dept_id, event_id (optional), format (csv|xlsx|pdf)
     """
     dept_id = request.args.get('dept_id')
-    # Accept either 'event_id' (view uses it) or 'event' (legacy). Treat either as the event name filter.
-    event_id = request.args.get('event_id') or request.args.get('event')
+    event_id = request.args.get('event_id')
     fmt = request.args.get('format', 'xlsx').lower()
-    
-    print(f"Exporting participants - dept_id: {dept_id}, event_id: {event_id}, format: {fmt}")
 
     # Helper to sanitize filename parts
     def _sanitize(s: str) -> str:
@@ -1196,36 +1147,31 @@ def export_participants():
             # assume event_id is a name string
             event_name = event_id
 
-    # Collect rows using the same logic as the view/table
-    rows = _collect_view_participants(selected_dept_id=dept_id, selected_event_id=event_id)
+    # Build participant rows directly from participants collection (matches view)
+    q = db.collection('participants')
+    if dept_name:
+        q = q.where('department', '==', dept_name)
+    if event_name:
+        q = q.where('event', '==', event_name)
+    rows = []
+    for doc in q.stream():
+        p = doc.to_dict()
+        rows.append({
+            'name': p.get('name', ''),
+            'email': p.get('email', ''),
+            'phone': p.get('phone', ''),
+            'college': p.get('college', ''),
+            'branch': _get_branch(p),
+            'year': p.get('year', ''),
+            'event_name': p.get('event', ''),
+            'dept_name': p.get('department', ''),
+            'transaction_id': p.get('transactionId') or p.get('transaction_id', '')
+        })
 
     # Sort
     rows = sorted(rows, key=lambda r: (r.get('dept_name', ''), r.get('event_name', ''), r.get('name', '')))
 
     headers = ['name', 'email', 'phone', 'college', 'branch', 'year', 'event_name', 'dept_name', 'transaction_id']
-
-    # Debug/logging: show how many rows will be exported and sample values
-    try:
-        print(f"Export participants rows count: {len(rows)}")
-        for i, s in enumerate(rows[:3]):
-            print(f" Export sample {i+1}: name={s.get('name')!r}, email={s.get('email')!r}, event={s.get('event_name')!r}")
-    except Exception:
-        pass
-
-    # If no rows, add a placeholder so the exported file isn't visually empty
-    if not rows:
-        print("No participants found for export; adding placeholder row.")
-        rows = [{
-            'name': 'No participants found',
-            'email': '',
-            'phone': '',
-            'college': '',
-            'branch': '',
-            'year': '',
-            'event_name': '',
-            'dept_name': '',
-            'transaction_id': ''
-        }]
 
     # Build filename pattern: tantra_{department}_{event}.{ext}
     part_dept = _sanitize(dept_name) if dept_name else 'all_departments'
@@ -1237,12 +1183,10 @@ def export_participants():
             import pandas as pd
         except Exception:
             return Response('pandas is required to export XLSX. Install with `pip install pandas openpyxl`', status=500)
-        print(f"Creating Excel file with {len(rows)} rows")
         df = pd.DataFrame(rows)
         for h in headers:
             if h not in df.columns:
                 df[h] = ''
-        print("DataFrame created successfully")
         buf = io.BytesIO()
         df.to_excel(buf, index=False)
         buf.seek(0)
@@ -1273,117 +1217,6 @@ def export_participants():
         return send_file(buf, as_attachment=True, download_name=filename, mimetype='application/pdf')
 
     return Response('Unsupported format. Allowed: xlsx, pdf', status=400)
-
-
-@app.route('/export_visible_pdf', methods=['POST'])
-def export_visible_pdf():
-    """Generate a PDF on the server from posted table data (headers + rows).
-
-    Expects JSON: { headers: [...], rows: [[...], ...], title: 'Optional Title' }
-    Returns: PDF file (application/pdf)
-    """
-    try:
-        data = request.get_json()
-        if not data:
-            return Response('Missing JSON body', status=400)
-
-        headers = data.get('headers') or []
-        rows = data.get('rows') or []
-        title = data.get('title') or 'Participants'
-
-        # Build table data for ReportLab
-        from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.lib import colors
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.enums import TA_CENTER
-
-        buf = io.BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=landscape(A4))
-
-        styles = getSampleStyleSheet()
-        heading_style = ParagraphStyle('Heading', parent=styles['Heading2'], alignment=TA_CENTER, spaceAfter=12)
-        story = [Paragraph(title, heading_style), Spacer(1, 12)]
-
-        table_data = [headers]
-        for r in rows:
-            # Ensure all cells are strings
-            table_data.append([str(c) if c is not None else '' for c in r])
-
-        tbl = Table(table_data, repeatRows=1)
-        tbl.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#7c4dff')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ]))
-
-        story.append(tbl)
-        doc.build(story)
-        buf.seek(0)
-        return send_file(buf, as_attachment=True, download_name='participants_visible_server.pdf', mimetype='application/pdf')
-
-    except Exception as e:
-        return str(e), 500
-
-
-@app.route('/export_visible_xlsx', methods=['POST'])
-def export_visible_xlsx():
-    """Generate an XLSX file on the server from posted table data (headers + rows).
-
-    Expects JSON: { headers: [...], rows: [[...], ...], title: 'Optional Title' }
-    Returns: XLSX file
-    """
-    try:
-        data = request.get_json()
-        if not data:
-            return Response('Missing JSON body', status=400)
-
-        headers = data.get('headers') or []
-        rows = data.get('rows') or []
-        title = data.get('title') or 'Participants'
-
-        # Build XLSX using openpyxl
-        from openpyxl import Workbook
-        from openpyxl.utils import get_column_letter
-        from openpyxl.styles import Font
-
-        buf = io.BytesIO()
-        wb = Workbook()
-        ws = wb.active
-        ws.title = 'Participants'
-
-        # Write headers
-        for col_idx, h in enumerate(headers, start=1):
-            cell = ws.cell(row=1, column=col_idx, value=h)
-            cell.font = Font(bold=True)
-
-        # Write rows
-        for r_idx, row in enumerate(rows, start=2):
-            for c_idx, val in enumerate(row, start=1):
-                ws.cell(row=r_idx, column=c_idx, value=val)
-
-        # Auto-adjust column widths
-        for column_cells in ws.columns:
-            max_length = 0
-            column_cells = list(column_cells)
-            for cell in column_cells:
-                try:
-                    if cell.value and len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except Exception:
-                    pass
-            adjusted_width = (max_length + 2)
-            if column_cells:
-                ws.column_dimensions[get_column_letter(column_cells[0].column)].width = adjusted_width
-
-        wb.save(buf)
-        buf.seek(0)
-        return send_file(buf, as_attachment=True, download_name='participants_visible_server.xlsx', mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-
-    except Exception as e:
-        return str(e), 500
 
 # -------------------- View Database Content --------------------
 @app.route('/db_content')
