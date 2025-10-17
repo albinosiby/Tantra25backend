@@ -1110,7 +1110,7 @@ def download_participants():
             q = q.where('event', '==', event_name)
             print(f"DOWNLOAD DEBUG - Applied event filter: {event_name}")
 
-        # Execute query
+        # Execute query - NO SORTING APPLIED
         docs = list(q.stream())
         print(f"DOWNLOAD DEBUG - Found {len(docs)} documents")
         
@@ -1128,6 +1128,8 @@ def download_participants():
             }
             participants.append(participant_data)
             print(f"DOWNLOAD DEBUG - Participant: {participant_data['name']} - {participant_data['event']}")
+
+        # NO SORTING - Keep data in original Firestore order
 
     except Exception as e:
         print(f"DOWNLOAD DEBUG - Error: {str(e)}")
@@ -1270,8 +1272,8 @@ def export_participants():
             'transaction_id': p.get('transactionId') or p.get('transaction_id', '')
         })
 
-    # Sort
-    rows = sorted(rows, key=lambda r: (r.get('dept_name', ''), r.get('event_name', ''), r.get('name', '')))
+    # NO SORTING - Keep data in original Firestore order
+    # rows = sorted(rows, key=lambda r: (r.get('dept_name', ''), r.get('event_name', ''), r.get('name', '')))
 
     headers = ['name', 'email', 'phone', 'college', 'branch', 'year', 'event_name', 'dept_name', 'transaction_id']
 
