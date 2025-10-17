@@ -71,8 +71,10 @@
       <div class="toolbar">
         <div class="left">
           <a href="/view_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}" class="btn btn-ghost"><i class="fas fa-sync-alt"></i> Refresh</a>
-          <a href="/export_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}&format=xlsx" class="btn btn-success"><i class="fas fa-file-excel"></i> Download XLSX</a>
-          <a href="/export_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}&format=pdf" class="btn btn-primary"><i class="fas fa-file-pdf"></i> Download PDF</a>
+          <!-- Server-side PDF export that will POST the visible table rows to the server -->
+          <button id="serverExportPdfBtn" class="btn btn-primary"><i class="fas fa-file-pdf"></i> Download PDF</button>
+          <!-- Client-side exports: export exactly the currently visible rows in the table -->
+          <button id="serverExportXlsxBtn" class="btn btn-primary" title="Download visible rows as Excel (.xlsx)"><i class="fas fa-file-excel"></i> Download Excel</button>
         </div>
       </div>
       {% endif %}
@@ -181,6 +183,118 @@
         });
       });
     }
+
+    // Client-side export of visible rows
+    function getVisibleTableData() {
+      const headers = Array.from(document.querySelectorAll('#participantsTable thead th')).map(th => th.innerText.trim());
+      const rows = [];
+      document.querySelectorAll('#participantsTable tbody tr').forEach(tr => {
+        if (tr.style.display === 'none') return;
+        const cells = Array.from(tr.cells).map(td => td.innerText.trim());
+        rows.push(cells);
+      });
+      return { headers, rows };
+    }
+
+    function downloadCsv(filename, headers, rows) {
+      const esc = v => '"' + (v || '').replace(/"/g, '""') + '"';
+      let csv = headers.map(h => esc(h)).join(',') + '\n';
+      rows.forEach(r => {
+        csv += r.map(c => esc(c)).join(',') + '\n';
+      });
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function downloadXlsHtml(filename, headers, rows) {
+      // Simple HTML table wrapper that Excel can open
+      let html = '<table><thead><tr>' + headers.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>';
+      rows.forEach(r => { html += '<tr>' + r.map(c => '<td>' + c + '</td>').join('') + '</tr>'; });
+      html += '</tbody></table>';
+      const blob = new Blob(['\uFEFF' + html], { type: 'application/vnd.ms-excel' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    const serverExportXlsxBtn = document.getElementById('serverExportXlsxBtn');
+    if (serverExportXlsxBtn) {
+      serverExportXlsxBtn.addEventListener('click', async function(e){
+        e.preventDefault();
+        const { headers, rows } = getVisibleTableData();
+        const title = document.querySelector('.brand h1') ? document.querySelector('.brand h1').innerText : 'Participants';
+        try {
+          const resp = await fetch('/export_visible_xlsx', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ headers: headers, rows: rows, title: title })
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            alert('Failed to generate XLSX: ' + text);
+            return;
+          }
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'participants_visible_server.xlsx';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        } catch (err) {
+          alert('Error exporting XLSX: ' + err.message);
+        }
+      });
+    }
+
+    // Client-side PDF export using jsPDF + autotable (loaded via CDN below)
+    // Server-side visible export: POST visible rows to server to generate PDF (reportlab)
+    const serverExportPdfBtn = document.getElementById('serverExportPdfBtn');
+    if (serverExportPdfBtn) {
+      serverExportPdfBtn.addEventListener('click', async function(e){
+        e.preventDefault();
+        const { headers, rows } = getVisibleTableData();
+        const title = document.querySelector('.brand h1') ? document.querySelector('.brand h1').innerText : 'Participants';
+
+        try {
+          const resp = await fetch('/export_visible_pdf', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ headers: headers, rows: rows, title: title })
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            alert('Failed to generate PDF: ' + text);
+            return;
+          }
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'participants_visible_server.pdf';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        } catch (err) {
+          alert('Error exporting PDF: ' + err.message);
+        }
+      });
+    }
   </script>
   <script>
     // Hide any stray fixed-position element anchored to bottom-left (unwanted download button)
@@ -205,5 +319,8 @@
       }
     })();
   </script>
+  <!-- jsPDF and autoTable for client-side PDF export -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
 </body>
 </html>
