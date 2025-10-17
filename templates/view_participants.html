@@ -17,68 +17,64 @@
           <div class="small">Manage registered participants</div>
         </div>
       </div>
-      <div class="controls">
-        <a href="/index" class="btn btn-ghost"><i class="fas fa-arrow-left"></i> Dashboard</a>
-        <a href="/add_event" class="btn btn-primary"><i class="fas fa-plus"></i> Add Event</a>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <button id="vpFilterToggle" class="btn btn-ghost" aria-expanded="false" title="Show department filters"><i class="fas fa-filter"></i></button>
+        <div class="controls">
+          <a href="/" class="btn btn-ghost"><i class="fas fa-arrow-left"></i> Dashboard</a>
+          <a href="/add_event" class="btn btn-primary"><i class="fas fa-plus"></i> Add Event</a>
+        </div>
       </div>
     </div>
 
     <div class="card">
-      <form method="GET" class="form-row">
-        <div class="form-group">
-          <label><i class="fas fa-filter"></i> Select Department:</label>
-          <select name="dept_id" id="deptSelect" onchange="this.form.submit()">
-            <option value="">-- Select Department --</option>
-            {% for id, name in departments %}
-              <option value="{{ id }}" {% if selected_dept_id == id %}selected{% endif %}>{{ name }}</option>
-            {% endfor %}
-          </select>
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <div>
+          <h2 style="margin:0">Participants</h2>
+          <div class="small">Showing {% if participants %}{{ participants|length }}{% else %}0{% endif %} participants{% if selected_dept_id %} — filtered by department{% endif %}</div>
         </div>
-      </form>
 
-      <div class="toolbar">
-        <div class="left">
-          <div class="form-group" style="min-width: 300px; margin: 0;">
-            <input class="search" id="participantSearch" placeholder="Search name, email, college..." />
-          </div>
-          {% if participants %}
-            <button class="copy-btn" id="copyBtn"><i class="fas fa-copy"></i> Copy Data</button>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <form method="GET" class="form-row" style="margin:0;">
+            <div class="form-group" style="min-width:220px;">
+              <label class="sr-only">Department</label>
+              <select name="dept_id" id="deptSelect" onchange="this.form.submit()">
+                <option value="">All Departments</option>
+                {% for id, name in departments %}
+                  <option value="{{ id }}" {% if selected_dept_id == id %}selected{% endif %}>{{ name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </form>
+
+          {% if events_for_select %}
+          <form method="GET" id="eventFilterForm" style="margin:0;">
+            <input type="hidden" name="dept_id" value="{{ selected_dept_id }}" />
+            <div class="form-group" style="min-width:220px;">
+              <label class="sr-only">Event</label>
+              <select name="event_id" onchange="document.getElementById('eventFilterForm').submit()">
+                <option value="">All Events</option>
+                {% for eid, ename in events_for_select %}
+                  <option value="{{ ename }}" {% if selected_event_id == ename %}selected{% endif %}>{{ ename }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </form>
           {% endif %}
+
+          <div style="display:flex;align-items:center;gap:8px;">
+            <input class="search" id="participantSearch" placeholder="Search name, email, college..." />
+            {% if participants %}
+              <button class="btn btn-ghost" id="copyBtn"><i class="fas fa-copy"></i></button>
+            {% endif %}
+            <a href="/export_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}&format=xlsx" class="btn btn-success"><i class="fas fa-file-excel"></i></a>
+            <a href="/export_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}&format=pdf" class="btn btn-primary"><i class="fas fa-file-pdf"></i></a>
+          </div>
         </div>
       </div>
-
-      {% if events_for_select %}
-      <form method="GET" id="eventFilterForm" class="form-row">
-        <input type="hidden" name="dept_id" value="{{ selected_dept_id }}" />
-        <div class="form-group">
-          <label><i class="fas fa-calendar-alt"></i> Select Event (optional):</label>
-          <select name="event_id" onchange="document.getElementById('eventFilterForm').submit()">
-            <option value="">-- All Events --</option>
-            {% for eid, ename in events_for_select %}
-              <option value="{{ ename }}" {% if selected_event_id == ename %}selected{% endif %}>{{ ename }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="form-group" style="display: flex; align-items: flex-end;">
-          <label style="margin-bottom: 8px; display: flex; align-items: center; gap: 8px; cursor: pointer;">
-            <input type="checkbox" name="sort_event" value="1" {% if request.args.get('sort_event') == '1' %}checked{% endif %} />
-            <span>Sort by event</span>
-          </label>
-        </div>
-      </form>
-
-      <div class="toolbar">
-        <div class="left">
-          <a href="/view_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}" class="btn btn-ghost"><i class="fas fa-sync-alt"></i> Refresh</a>
-          <a href="/export_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}&format=xlsx" class="btn btn-success"><i class="fas fa-file-excel"></i> Download XLSX</a>
-          <a href="/export_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}&format=pdf" class="btn btn-primary"><i class="fas fa-file-pdf"></i> Download PDF</a>
-        </div>
-      </div>
-      {% endif %}
 
       {% if participants %}
-      <div class="table-wrap">
-        <table id="participantsTable">
+      <div class="table-wrap" style="margin-top:18px;">
+  <table id="participantsTable" class="striped hoverable responsive-table">
           <thead>
             <tr>
               <th><i class="fas fa-user"></i> Name</th>
@@ -94,27 +90,30 @@
           <tbody>
           {% for p in participants %}
           <tr>
-            <td data-label="Name">{{ (p['name'] if p['name'] and p['name']|string != 'None' else '-') }}</td>
-            <td data-label="Email">{{ (p['email'] if p['email'] and p['email']|string != 'None' else '-') }}</td>
-            <td data-label="Phone">{{ (p['phone'] if p['phone'] and p['phone']|string != 'None' else '-') }}</td>
-            <td data-label="College">{{ (p['college'] if p['college'] and p['college']|string != 'None' else '-') }}</td>
-            <td data-label="Branch">{{ (p['branch'] if p['branch'] and p['branch']|string != 'None' else '-') }}</td>
-            <td data-label="Year">{{ (p['year'] if p['year'] and p['year']|string != 'None' else '-') }}</td>
-            <td data-label="Event"><span class="badge">{{ (p['event_name'] if p['event_name'] and p['event_name']|string != 'None' else '-') }}</span></td>
-            <td data-label="Transaction ID"><code>{{ (p['transaction_id'] if p['transaction_id'] and p['transaction_id']|string != 'None' else '-') }}</code></td>
+            <td>{{ p['name'] }}</td>
+            <td>{{ p['email'] }}</td>
+            <td>{{ p['phone'] }}</td>
+            <td>{{ p['college'] }}</td>
+            <td>{{ p['branch'] }}</td>
+            <td>{{ p['year'] }}</td>
+            <td><span class="badge small">{{ p['event_name'] }}</span></td>
+            <td><code>{{ p['transaction_id'] }}</code></td>
           </tr>
           {% endfor %}
           </tbody>
         </table>
       </div>
       {% else %}
-      <div class="no-data">
+      <div class="no-data" style="margin-top:18px;">
         <i class="fas fa-users-slash" style="font-size: 48px; margin-bottom: 16px; color: var(--muted);"></i>
-        <p>No participants registered for this department.</p>
+        <p>No participants match your filters.</p>
       </div>
       {% endif %}
 
-      <a href="/index" class="back-link"><i class="fas fa-arrow-left"></i> Back to Admin Panel</a>
+      <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;">
+        <a href="/" class="back-link"><i class="fas fa-arrow-left"></i> Back to Admin Panel</a>
+        <div class="small muted">Tip: use the search box to quickly filter participants</div>
+      </div>
     </div>
   </div>
 
@@ -182,27 +181,19 @@
     }
   </script>
   <script>
-    // Hide any stray fixed-position element anchored to bottom-left (unwanted download button)
-    (function(){
-      try {
-        const els = Array.from(document.querySelectorAll('body *'));
-        els.forEach(el => {
-          const style = window.getComputedStyle(el);
-          if (style.position === 'fixed') {
-            const r = el.getBoundingClientRect();
-            // check if it's near bottom-left corner (within 120px of left and 120px of bottom)
-            if (r.left >= 0 && r.left <= 140 && (window.innerHeight - (r.top + r.height)) >= -10 && (window.innerHeight - (r.top + r.height)) <= 140) {
-              // hide it
-              el.style.display = 'none';
-              el.setAttribute('data-hidden-by', 'admin-cleanup');
-            }
-          }
+    // Add responsive table labels on this page as well
+    function addResponsiveTableLabelsLocal(){
+      const tables = Array.from(document.querySelectorAll('table.responsive-table'));
+      tables.forEach(table => {
+        const ths = Array.from(table.querySelectorAll('thead th'));
+        const headers = ths.length ? ths.map(th => th.innerText.trim()) : [];
+        table.querySelectorAll('tbody tr').forEach(tr => {
+          Array.from(tr.children).forEach((td, idx) => td.setAttribute('data-label', headers[idx] || ''));
         });
-      } catch(e) {
-        // noop
-        console.warn('cleanup script failed', e);
-      }
-    })();
+      });
+    }
+    window.addEventListener('resize', addResponsiveTableLabelsLocal);
+    addResponsiveTableLabelsLocal();
   </script>
 </body>
 </html>
