@@ -975,10 +975,24 @@ def download_participants():
     try:
         print(f"Participants fetched for export: {len(participants)}")
         for i, samp in enumerate(participants[:3]):
-            print(f" Sample {i+1}: name={samp.get('name')!r}, email={samp.get('email')!r}, event={samp.get('event')!r}")
+            print(f" Sample {i+1}: name={samp.get('name')!r}, email={samp.get('email')!r}, event={samp.get('event_name') or samp.get('event')!r}")
     except Exception:
         # ignore any logging errors
         pass
+
+    # If no participants were found, include a placeholder row so the exported file isn't completely empty
+    if not participants:
+        print("No participants found for selected filters — adding placeholder row to export.")
+        participants = [{
+            'name': 'No participants found',
+            'event_name': '',
+            'college': '',
+            'branch': '',
+            'year': '',
+            'email': '',
+            'phone': '',
+            'transaction_id': ''
+        }]
 
     # Column order should match the page exactly
     export_headers = ['Name', 'Event', 'College', 'Branch', 'Year', 'Email', 'Phone', 'Transaction ID']
@@ -1190,6 +1204,29 @@ def export_participants():
 
     headers = ['name', 'email', 'phone', 'college', 'branch', 'year', 'event_name', 'dept_name', 'transaction_id']
 
+    # Debug/logging: show how many rows will be exported and sample values
+    try:
+        print(f"Export participants rows count: {len(rows)}")
+        for i, s in enumerate(rows[:3]):
+            print(f" Export sample {i+1}: name={s.get('name')!r}, email={s.get('email')!r}, event={s.get('event_name')!r}")
+    except Exception:
+        pass
+
+    # If no rows, add a placeholder so the exported file isn't visually empty
+    if not rows:
+        print("No participants found for export; adding placeholder row.")
+        rows = [{
+            'name': 'No participants found',
+            'email': '',
+            'phone': '',
+            'college': '',
+            'branch': '',
+            'year': '',
+            'event_name': '',
+            'dept_name': '',
+            'transaction_id': ''
+        }]
+
     # Build filename pattern: tantra_{department}_{event}.{ext}
     part_dept = _sanitize(dept_name) if dept_name else 'all_departments'
     part_event = _sanitize(event_name) if event_name else 'all_events'
@@ -1236,6 +1273,117 @@ def export_participants():
         return send_file(buf, as_attachment=True, download_name=filename, mimetype='application/pdf')
 
     return Response('Unsupported format. Allowed: xlsx, pdf', status=400)
+
+
+@app.route('/export_visible_pdf', methods=['POST'])
+def export_visible_pdf():
+    """Generate a PDF on the server from posted table data (headers + rows).
+
+    Expects JSON: { headers: [...], rows: [[...], ...], title: 'Optional Title' }
+    Returns: PDF file (application/pdf)
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return Response('Missing JSON body', status=400)
+
+        headers = data.get('headers') or []
+        rows = data.get('rows') or []
+        title = data.get('title') or 'Participants'
+
+        # Build table data for ReportLab
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=landscape(A4))
+
+        styles = getSampleStyleSheet()
+        heading_style = ParagraphStyle('Heading', parent=styles['Heading2'], alignment=TA_CENTER, spaceAfter=12)
+        story = [Paragraph(title, heading_style), Spacer(1, 12)]
+
+        table_data = [headers]
+        for r in rows:
+            # Ensure all cells are strings
+            table_data.append([str(c) if c is not None else '' for c in r])
+
+        tbl = Table(table_data, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#7c4dff')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+
+        story.append(tbl)
+        doc.build(story)
+        buf.seek(0)
+        return send_file(buf, as_attachment=True, download_name='participants_visible_server.pdf', mimetype='application/pdf')
+
+    except Exception as e:
+        return str(e), 500
+
+
+@app.route('/export_visible_xlsx', methods=['POST'])
+def export_visible_xlsx():
+    """Generate an XLSX file on the server from posted table data (headers + rows).
+
+    Expects JSON: { headers: [...], rows: [[...], ...], title: 'Optional Title' }
+    Returns: XLSX file
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return Response('Missing JSON body', status=400)
+
+        headers = data.get('headers') or []
+        rows = data.get('rows') or []
+        title = data.get('title') or 'Participants'
+
+        # Build XLSX using openpyxl
+        from openpyxl import Workbook
+        from openpyxl.utils import get_column_letter
+        from openpyxl.styles import Font
+
+        buf = io.BytesIO()
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Participants'
+
+        # Write headers
+        for col_idx, h in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=h)
+            cell.font = Font(bold=True)
+
+        # Write rows
+        for r_idx, row in enumerate(rows, start=2):
+            for c_idx, val in enumerate(row, start=1):
+                ws.cell(row=r_idx, column=c_idx, value=val)
+
+        # Auto-adjust column widths
+        for column_cells in ws.columns:
+            max_length = 0
+            column_cells = list(column_cells)
+            for cell in column_cells:
+                try:
+                    if cell.value and len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except Exception:
+                    pass
+            adjusted_width = (max_length + 2)
+            if column_cells:
+                ws.column_dimensions[get_column_letter(column_cells[0].column)].width = adjusted_width
+
+        wb.save(buf)
+        buf.seek(0)
+        return send_file(buf, as_attachment=True, download_name='participants_visible_server.xlsx', mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+    except Exception as e:
+        return str(e), 500
 
 # -------------------- View Database Content --------------------
 @app.route('/db_content')
