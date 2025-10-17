@@ -21,8 +21,17 @@ app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key')
 # -------------------- Auth (CSV) --------------------
 AUTH_CSV = os.path.join(os.path.dirname(__file__), 'auth.csv')
 
+# Note: Removed automatic creation of auth.csv. The app now expects an existing CSV
+# at `AUTH_CSV`. The login flow will attempt to read it and return a helpful
+# error if the file is missing.
+
+
 def load_auth(path: str) -> dict:
-    """Load auth CSV into a dict mapping username -> {password, role, department_id}."""
+    """Load auth CSV into a dict mapping username -> {password, role, department_id}.
+
+    This function will NOT create the file. If the file does not exist it returns an
+    empty dict so the caller can handle the condition (for example, by showing an error).
+    """
     auth = {}
     if not os.path.exists(path):
         return auth
@@ -59,7 +68,11 @@ def load_auth(path: str) -> dict:
 
 
 def authenticate(username: str, password: str) -> dict:
-    """Return auth record if username/password match, else None."""
+    """Return auth record if username/password match, else None.
+
+    This function loads the CSV at call time and does not create a file. If the CSV
+    is missing or empty the function returns None.
+    """
     auth = load_auth(AUTH_CSV)
     if not auth:
         # no auth file or failed to read; treat as authentication failure (login will render helpful message)
@@ -72,23 +85,36 @@ def authenticate(username: str, password: str) -> dict:
     return None
 
 # Base link to use when constructing absolute URLs for saved DB links.
+# Change this to your deployment base URL when you deploy (e.g. https://example.com)
 curr_link = os.environ.get('CURR_LINK', "https://tantra-vl7d.onrender.com")
 
 def make_static_url(filename: str) -> str:
-    """Return an absolute URL for a file in the static folder using curr_link as base."""
+    """Return an absolute URL for a file in the static folder using curr_link as base.
+
+    Example: make_static_url('logos/foo.png') -> 'http://127.0.0.1:5000/static/logos/foo.png'
+    """
+    # use url_for to get the path portion, then prefix with curr_link
     path = url_for('static', filename=filename, _external=False)
     return curr_link.rstrip('/') + path
 
 
 def _get_branch(obj: dict) -> str:
-    """Return a branch value from a participant/record dict using multiple possible keys."""
+    """Return a branch value from a participant/record dict using multiple possible keys.
+
+    Firestore documents in this project have used different field names for branch
+    over time (e.g. 'branch/Class', 'branch', 'Class', 'branch_name'). This helper
+    centralizes the fallback logic so exports and views consistently include branch.
+    """
     if not obj:
         return ''
     return (obj.get('branch/Class') or obj.get('branch') or obj.get('Class') or obj.get('branch_name') or '')
 
 
 def _normalize_status(val) -> str:
-    """Normalize a status value from the database or incoming form to a string 'open' or 'close'."""
+    """Normalize a status value from the database or incoming form to a string 'open' or 'close'.
+
+    Handles numeric (1/0 or '1'/'0'), legacy values 'open'/'closed' and returns 'open' by default.
+    """
     if val is None:
         return 'open'
     try:
@@ -118,6 +144,12 @@ app.config['UPLOAD_EVENT_FOLDER'] = UPLOAD_EVENT_FOLDER
 app.config['UPLOAD_LOGO_FOLDER'] = UPLOAD_LOGO_FOLDER
 
 # -------------------- Firebase --------------------
+# Initialize Firebase using one of the following (in order of preference):
+# 1) FIREBASE_SERVICE_ACCOUNT_JSON environment variable containing the
+#    service account JSON string
+# 2) FIREBASE_CREDENTIALS_FILE environment variable pointing to a file path
+# 3) A file checked into the repo (not recommended)
+
 _sa_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON')
 _sa_file = os.environ.get('FIREBASE_CREDENTIALS_FILE', 'techfestadmin-a2e2c-firebase-adminsdk-fbsvc-a2a3aaa0e7.json')
 
@@ -380,6 +412,7 @@ def index():
         event_counts_map = {}
 
     # Count registrations/participants and unique participants
+    # Some deployments use a 'registrations' collection; others (your setup) use 'participants'.
     parts = list(db.collection('participants').stream())
     total_registrations = len(parts)
     unique_participants = set()
@@ -419,6 +452,9 @@ def index():
                            recent_events=recent_events,
                            departments=dept_list,
                            username=session.get('username'))
+
+
+
 
 
 @app.route('/dept_events/<dept_id>', methods=['GET'])
@@ -528,6 +564,7 @@ def add_event():
         category = request.form.get('category', 'Individual')
         coordinator = request.form.get('coordinator', '')
         coordinatorPhone = request.form.get('coordinatorPhone', '')
+        # 'participants' field removed from the form (not stored)
 
         # Event image upload
         event_file = request.files.get('event_image')
@@ -540,6 +577,7 @@ def add_event():
 
         # Get department QR and store event in top-level `events` collection
         dept_doc = db.collection('departments').document(dept_id).get() if dept_id else None
+            # No payment_qr_url needed
 
         # status: use string 'open' or 'close'. Accept legacy numeric values and normalize.
         status = _normalize_status(request.form.get('status', 'open'))
@@ -589,6 +627,9 @@ def add_event():
     return render_template('add_event.html', departments=dept_list, default_date=default_date)
 
 
+
+
+
 @app.route('/delete_event', methods=['POST'])
 def delete_event():
     if 'username' not in session:
@@ -631,7 +672,12 @@ def delete_event():
 
 @app.route('/toggle_event_status', methods=['POST'])
 def toggle_event_status():
-    """Toggle event registration status between 'open' and 'close'."""
+    """Toggle event registration status between 'open' and 'close'.
+
+    Expects form-encoded POST with 'event_id'. Requires logged-in session user.
+    Flips string status ('open'->'close' or 'close'->'open') and persists to Firestore.
+    Returns JSON with the new status string and boolean is_open.
+    """
     if 'username' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
 
@@ -658,7 +704,10 @@ def toggle_event_status():
 
 
 def _resolve_participant_from_registration(reg_data: dict) -> Dict:
-    """Given a registration document dict, attempt to resolve participant data."""
+    """Given a registration document dict, attempt to resolve participant data.
+    Handles keys: participant_id, user_id, 'participant' inline dict, participant_email, email.
+    Returns participant dict or None if not found.
+    """
     if not reg_data or not isinstance(reg_data, dict):
         return None
 
@@ -690,47 +739,6 @@ def _resolve_participant_from_registration(reg_data: dict) -> Dict:
         for doc in q2:
             return doc.to_dict()
     return None
-
-# -------------------- Debug Route --------------------
-@app.route('/debug_participants')
-def debug_participants():
-    """Debug route to check what data is being fetched"""
-    dept_id = request.args.get('dept_id')
-    event_name = request.args.get('event')
-    
-    print(f"DEBUG - dept_id: {dept_id}, event_name: {event_name}")
-    
-    # Build query
-    q = db.collection('participants')
-    if dept_id:
-        try:
-            ddoc = db.collection('departments').document(dept_id).get()
-            if ddoc.exists:
-                dept_name = ddoc.to_dict().get('name')
-                q = q.where('department', '==', dept_name)
-                print(f"DEBUG - Filtering by department name: {dept_name}")
-        except Exception as e:
-            print(f"DEBUG - Error getting department: {e}")
-    
-    if event_name:
-        q = q.where('event', '==', event_name)
-        print(f"DEBUG - Filtering by event: {event_name}")
-    
-    participants = []
-    try:
-        for doc in q.stream():
-            data = doc.to_dict()
-            participants.append(data)
-            print(f"DEBUG - Found participant: {data.get('name')} - Event: {data.get('event')}")
-    except Exception as e:
-        print(f"DEBUG - Error fetching participants: {e}")
-    
-    return jsonify({
-        'dept_id': dept_id,
-        'event_name': event_name,
-        'participant_count': len(participants),
-        'participants': participants
-    })
 
 # -------------------- View Participants --------------------
 @app.route('/view_participants', methods=['GET'])
@@ -807,7 +815,13 @@ def view_participants():
 
 @app.route('/participants_list', methods=['GET'])
 def participants_list():
-    """Participants listing for a department with optional event filter and sorting."""
+    """Participants listing for a department with optional event filter and sorting.
+
+    Query params:
+      dept_id - department document id (preferred)
+      event - event name to filter participants by
+      sort - 'event' to sort by event, otherwise sort by name
+    """
     dept_id = request.args.get('dept_id')
     selected_event = request.args.get('event')
     sort = request.args.get('sort', '')
@@ -884,191 +898,7 @@ def participants_list():
     return render_template('participants_list.html', participants=parts, dept_name=dept_name, dept_id=dept_id,
                            events_for_select=events_for_select, selected_event=selected_event, sort=sort)
 
-# -------------------- Download Helper Functions --------------------
-def create_empty_excel(message):
-    """Create an Excel file with just a message"""
-    try:
-        output = io.BytesIO()
-        workbook = openpyxl.Workbook()
-        sheet = workbook.active
-        sheet.title = "No Data"
-        sheet['A1'] = message
-        workbook.save(output)
-        output.seek(0)
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name='no_data.xlsx'
-        )
-    except Exception as e:
-        return f"Error creating empty Excel: {str(e)}", 500
 
-
-def create_empty_pdf(message):
-    """Create a PDF with just a message"""
-    try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import SimpleDocTemplate, Paragraph
-        from reportlab.lib.styles import getSampleStyleSheet
-
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4)
-        styles = getSampleStyleSheet()
-        story = [Paragraph(message, styles['Normal'])]
-        doc.build(story)
-        buffer.seek(0)
-        return send_file(buffer, mimetype='application/pdf', as_attachment=True, download_name='no_data.pdf')
-    except Exception as e:
-        return f"Error creating empty PDF: {str(e)}", 500
-
-
-def create_excel_file(participants, headers, event_name, dept_name):
-    """Create Excel file with participant data"""
-    try:
-        output = io.BytesIO()
-        workbook = openpyxl.Workbook()
-        sheet = workbook.active
-        
-        # Create a descriptive title
-        title = f"Participants - {event_name or 'All Events'}"
-        if dept_name:
-            title += f" - {dept_name}"
-        sheet.title = "Participants"
-        sheet['A1'] = title
-        
-        # Write headers starting from row 3
-        for col, header in enumerate(headers, 1):
-            sheet.cell(row=3, column=col, value=header)
-
-        # Write data rows
-        for row_idx, p in enumerate(participants, start=4):
-            row_vals = [
-                p.get('name', ''),
-                p.get('event', ''),
-                p.get('college', ''),
-                p.get('branch', ''),
-                p.get('year', ''),
-                p.get('email', ''),
-                p.get('phone', ''),
-                p.get('transaction_id', '')
-            ]
-            for col_idx, val in enumerate(row_vals, start=1):
-                sheet.cell(row=row_idx, column=col_idx, value=val)
-
-        # Style the headers
-        for cell in sheet[3]:  # Row 3 contains headers
-            cell.font = openpyxl.styles.Font(bold=True)
-            cell.fill = openpyxl.styles.PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
-
-        # Auto-adjust column widths
-        for column in sheet.columns:
-            max_length = 0
-            column_letter = column[0].column_letter
-            for cell in column:
-                try:
-                    if cell.value and len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
-            sheet.column_dimensions[column_letter].width = adjusted_width
-
-        workbook.save(output)
-        output.seek(0)
-
-        filename = f"participants_{event_name or 'all'}.xlsx"
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=filename
-        )
-    except Exception as e:
-        print(f"Excel creation error: {str(e)}")
-        import traceback
-        print(f"Excel traceback: {traceback.format_exc()}")
-        return f"Error creating Excel file: {str(e)}", 500
-
-
-def create_pdf_file(participants, headers, event_name, dept_name):
-    """Create PDF file with participant data"""
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.enums import TA_CENTER
-
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=landscape(A4))
-        
-        styles = getSampleStyleSheet()
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            alignment=TA_CENTER,
-            spaceAfter=12
-        )
-        
-        # Create title
-        title_text = f"Participants List"
-        if event_name:
-            title_text += f" - {event_name}"
-        if dept_name:
-            title_text += f" - {dept_name}"
-            
-        title = Paragraph(title_text, title_style)
-
-        # Build table data
-        table_data = [headers]
-        for p in participants:
-            row = [
-                p.get('name', ''),
-                p.get('event', ''),
-                p.get('college', ''),
-                p.get('branch', ''),
-                p.get('year', ''),
-                p.get('email', ''),
-                p.get('phone', ''),
-                p.get('transaction_id', '')
-            ]
-            table_data.append(row)
-
-        # Create table
-        table = Table(table_data, repeatRows=1)
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4a4a4a')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
-            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 1), (-1, -1), 8),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-
-        doc.build([title, table])
-        buffer.seek(0)
-        
-        filename = f"participants_{event_name or 'all'}.pdf"
-        return send_file(
-            buffer, 
-            mimetype='application/pdf', 
-            as_attachment=True, 
-            download_name=filename
-        )
-        
-    except Exception as e:
-        print(f"PDF creation error: {str(e)}")
-        import traceback
-        print(f"PDF traceback: {traceback.format_exc()}")
-        return f"Error creating PDF file: {str(e)}", 500
-
-# -------------------- Download Participants --------------------
 @app.route('/download_participants')
 def download_participants():
     """Download participants list in XLSX or PDF format."""
@@ -1079,44 +909,34 @@ def download_participants():
     format_type = request.args.get('format', 'xlsx')
     dept_id = request.args.get('dept_id')
     
-    print(f"DOWNLOAD DEBUG - event: {event_name}, format: {format_type}, dept_id: {dept_id}")
+    print(f"Downloading participants - event: {event_name}, format: {format_type}, dept_id: {dept_id}")
 
-    # Require either an event or a department filter
-    if not event_name and not dept_id:
-        return Response('Please select a department or an event before downloading.', status=400)
-
+    # Allow exporting all events when event_name is not provided
     participants = []
-    dept_name = None
     
     try:
-        # Build query
+        # Build query for participants collection
         q = db.collection('participants')
         
-        # Handle department filter
+        # Only apply department filter if provided
         if dept_id:
-            try:
-                ddoc = db.collection('departments').document(dept_id).get()
-                if ddoc.exists:
-                    dept_name = ddoc.to_dict().get('name')
+            ddoc = db.collection('departments').document(dept_id).get()
+            if ddoc.exists:
+                dept_name = ddoc.to_dict().get('name')
+                if dept_name:  # Only filter if we got a valid department name
                     q = q.where('department', '==', dept_name)
-                    print(f"DOWNLOAD DEBUG - Applied department filter: {dept_name}")
-                else:
-                    print(f"DOWNLOAD DEBUG - Department document {dept_id} not found")
-            except Exception as e:
-                print(f"DOWNLOAD DEBUG - Error getting department: {e}")
         
-        # Handle event filter
-        if event_name:
+        # Only apply event filter if provided
+        if event_name and event_name.strip():
             q = q.where('event', '==', event_name)
-            print(f"DOWNLOAD DEBUG - Applied event filter: {event_name}")
 
-        # Execute query - NO SORTING APPLIED
+        print(f"Executing query for participants...")
         docs = list(q.stream())
-        print(f"DOWNLOAD DEBUG - Found {len(docs)} documents")
+        print(f"Found {len(docs)} participants")
         
         for doc in docs:
             data = doc.to_dict() or {}
-            participant_data = {
+            participants.append({
                 'name': data.get('name', ''),
                 'event': data.get('event', ''),
                 'college': data.get('college', ''),
@@ -1124,39 +944,120 @@ def download_participants():
                 'year': data.get('year', ''),
                 'email': data.get('email', ''),
                 'phone': data.get('phone', ''),
+                # robust transaction id lookup
                 'transaction_id': data.get('transactionId') or data.get('transaction_id') or data.get('txid') or data.get('transaction') or ''
-            }
-            participants.append(participant_data)
-            print(f"DOWNLOAD DEBUG - Participant: {participant_data['name']} - {participant_data['event']}")
-
-        # NO SORTING - Keep data in original Firestore order
-
+            })
     except Exception as e:
-        print(f"DOWNLOAD DEBUG - Error: {str(e)}")
-        import traceback
-        print(f"DOWNLOAD DEBUG - Traceback: {traceback.format_exc()}")
-        return f"Error fetching data: {str(e)}", 500
+        return str(e), 500
 
-    print(f"DOWNLOAD DEBUG - Total participants for export: {len(participants)}")
-
-    # If no participants found, return appropriate message
-    if not participants:
-        if format_type == 'xlsx':
-            return create_empty_excel("No participants found for the selected criteria")
-        elif format_type == 'pdf':
-            return create_empty_pdf("No participants found for the selected criteria")
-        else:
-            return "No participants found for the selected criteria", 404
-
-    # Column headers
+    # Column order should match the page exactly
     export_headers = ['Name', 'Event', 'College', 'Branch', 'Year', 'Email', 'Phone', 'Transaction ID']
 
     if format_type == 'xlsx':
-        return create_excel_file(participants, export_headers, event_name, dept_name)
+        try:
+            # Create Excel file in memory
+            output = io.BytesIO()
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = "Participants"
+
+            # Write headers
+            for col, header in enumerate(export_headers, 1):
+                sheet.cell(row=1, column=col, value=header)
+
+            # Write data rows
+            for row_idx, p in enumerate(participants, start=2):
+                row_vals = [
+                    p.get('name', ''),
+                    p.get('event', ''),
+                    p.get('college', ''),
+                    p.get('branch', ''),
+                    p.get('year', ''),
+                    p.get('email', ''),
+                    p.get('phone', ''),
+                    p.get('transaction_id', '')
+                ]
+                for col_idx, val in enumerate(row_vals, start=1):
+                    sheet.cell(row=row_idx, column=col_idx, value=val)
+
+            # Style the headers
+            for cell in sheet[1]:
+                cell.font = openpyxl.styles.Font(bold=True)
+
+            # Auto-adjust column widths
+            for column in sheet.columns:
+                max_length = 0
+                column = list(column)
+                for cell in column:
+                    try:
+                        if cell.value and len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = (max_length + 2)
+                sheet.column_dimensions[column[0].column_letter].width = adjusted_width
+
+            workbook.save(output)
+            output.seek(0)
+
+            filename = f"{event_name or 'all_events'}_participants.xlsx"
+            return send_file(
+                output,
+                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                as_attachment=True,
+                download_name=filename
+            )
+        except Exception as e:
+            return str(e), 500
+
     elif format_type == 'pdf':
-        return create_pdf_file(participants, export_headers, event_name, dept_name)
-    else:
-        return "Invalid format type. Use 'xlsx' or 'pdf'.", 400
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4, landscape
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.enums import TA_CENTER
+
+            buffer = io.BytesIO()
+            doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), title=f"{event_name or 'All Events'} - Participants List")
+
+            # Build table data
+            table_data = [export_headers]
+            for p in participants:
+                row = [
+                    p.get('name', ''),
+                    p.get('event', ''),
+                    p.get('college', ''),
+                    p.get('branch', ''),
+                    p.get('year', ''),
+                    p.get('email', ''),
+                    p.get('phone', ''),
+                    p.get('transaction_id', '')
+                ]
+                table_data.append(row)
+
+            style = TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4a4a4a')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ])
+
+            table = Table(table_data)
+            table.setStyle(style)
+
+            styles = getSampleStyleSheet()
+            heading_style = ParagraphStyle('Heading', parent=styles['Heading1'], alignment=TA_CENTER, spaceAfter=12)
+            heading = Paragraph(f"{event_name or 'All Events'} - Participants List", heading_style)
+
+            doc.build([heading, table])
+            buffer.seek(0)
+            filename = f"{event_name or 'all_events'}_participants.pdf"
+            return send_file(buffer, mimetype='application/pdf', as_attachment=True, download_name=filename)
+        except Exception as e:
+            return str(e), 500
+
+    return "Invalid format type", 400
 
 
 def _gather_participants(dept_id: str, event_id: str = None) -> List[Dict]:
@@ -1212,7 +1113,13 @@ def _gather_participants(dept_id: str, event_id: str = None) -> List[Dict]:
 
 @app.route('/export_participants')
 def export_participants():
-    """Export participants for a department (and optional event) in csv/xlsx/pdf formats."""
+    """Export participants for a department (and optional event) in csv/xlsx/pdf formats.
+
+    Query params: dept_id, event_id (optional), format (csv|xlsx|pdf)
+    """
+    if 'username' not in session:
+        return redirect(url_for('login'))
+        
     dept_id = request.args.get('dept_id')
     event_id = request.args.get('event_id')
     fmt = request.args.get('format', 'xlsx').lower()
@@ -1249,16 +1156,26 @@ def export_participants():
 
     # Build participant rows directly from participants collection (matches view)
     q = db.collection('participants')
-    if dept_name:
+    
+    # Only apply filters if they are provided
+    if dept_name and dept_name.strip():
         print(f"Filtering by department: {dept_name}")
         q = q.where('department', '==', dept_name)
-    if event_name:
+    if event_name and event_name.strip():
         print(f"Filtering by event: {event_name}")
         q = q.where('event', '==', event_name)
+        
     rows = []
     print("Fetching participants data...")
-    for doc in q.stream():
+    
+    docs = list(q.stream())  # Convert to list to check if empty
+    if not docs:
+        print("No participants found with the current filters")
+    
+    for doc in docs:
         p = doc.to_dict()
+        if not p:  # Skip if document is empty
+            continue
         print(f"Found participant: {p.get('name', 'Unknown')}")
         rows.append({
             'name': p.get('name', ''),
@@ -1272,8 +1189,8 @@ def export_participants():
             'transaction_id': p.get('transactionId') or p.get('transaction_id', '')
         })
 
-    # NO SORTING - Keep data in original Firestore order
-    # rows = sorted(rows, key=lambda r: (r.get('dept_name', ''), r.get('event_name', ''), r.get('name', '')))
+    # Sort
+    rows = sorted(rows, key=lambda r: (r.get('dept_name', ''), r.get('event_name', ''), r.get('name', '')))
 
     headers = ['name', 'email', 'phone', 'college', 'branch', 'year', 'event_name', 'dept_name', 'transaction_id']
 
@@ -1378,7 +1295,18 @@ def fix_events():
 
 @app.route('/repair_events', methods=['GET'])
 def repair_events():
-    """Admin utility: analyze and optionally repair 'events' documents."""
+    """Admin utility: analyze and optionally repair 'events' documents.
+
+    Query params:
+      apply=1  -> apply the safe repairs (otherwise dry-run)
+
+    Repairs performed when apply=1:
+      - ensure document contains numeric 'id' field (derived from numeric doc id if possible)
+      - if 'dept_id' missing but 'department' present and matches a department doc id, set 'dept_id'
+      - ensure 'image' and 'image_url' fields are present when an image_url is available
+
+    Returns a JSON report of findings and applied changes.
+    """
     apply = request.args.get('apply', '') == '1'
 
     # load departments map (id -> name)
