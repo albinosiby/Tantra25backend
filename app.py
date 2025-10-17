@@ -740,6 +740,56 @@ def _resolve_participant_from_registration(reg_data: dict) -> Dict:
             return doc.to_dict()
     return None
 
+
+def _collect_view_participants(selected_dept_id: str = None, selected_event_id: str = None) -> List[Dict]:
+    """Return participants using the same logic/shape as `view_participants`.
+
+    Args:
+        selected_dept_id: department document id (optional)
+        selected_event_id: event name string (optional)
+
+    Returns:
+        List[dict] with keys: name, email, phone, college, branch, year, event_name, dept_name, event_id, transaction_id
+    """
+    parts = []
+    parts_stream = db.collection('participants').stream()
+
+    selected_dept_name = None
+    if selected_dept_id:
+        try:
+            ddoc = db.collection('departments').document(selected_dept_id).get()
+            if ddoc.exists:
+                selected_dept_name = ddoc.to_dict().get('name')
+        except Exception:
+            selected_dept_name = None
+
+    for pdoc in parts_stream:
+        p = pdoc.to_dict() or {}
+        p_dept = p.get('department') or ''
+        p_event = p.get('event') or ''
+        # apply filters if provided
+        if selected_dept_name and p_dept != selected_dept_name:
+            continue
+        if selected_event_id and p_event != selected_event_id:
+            continue
+
+        parts.append({
+            'name': p.get('name', ''),
+            'email': p.get('email', ''),
+            'phone': p.get('phone', ''),
+            'college': p.get('college', ''),
+            'branch': _get_branch(p),
+            'year': p.get('year', ''),
+            'event_name': p_event,
+            'dept_name': p_dept,
+            'event_id': '',
+            'transaction_id': p.get('transactionId') or p.get('transaction_id') or p.get('txid') or p.get('transaction') or ''
+        })
+
+    # sort by dept, event, name to match view
+    parts = sorted(parts, key=lambda r: (r.get('dept_name', ''), r.get('event_name', ''), r.get('name', '') ))
+    return parts
+
 # -------------------- View Participants --------------------
 @app.route('/view_participants', methods=['GET'])
 def view_participants():
@@ -905,50 +955,30 @@ def download_participants():
     if 'username' not in session:
         return redirect(url_for('login'))
 
-    event_name = request.args.get('event')
+    # Accept either 'event' (legacy) or 'event_id' (used by view). Treat both as event name when present.
+    event_name = request.args.get('event') or request.args.get('event_id')
     format_type = request.args.get('format', 'xlsx')
     dept_id = request.args.get('dept_id')
     
     print(f"Downloading participants - event: {event_name}, format: {format_type}, dept_id: {dept_id}")
 
-    # Allow exporting all events when event_name is not provided
-    participants = []
-    
-    try:
-        # Build query for participants collection
-        q = db.collection('participants')
-        
-        # Only apply department filter if provided
-        if dept_id:
-            ddoc = db.collection('departments').document(dept_id).get()
-            if ddoc.exists:
-                dept_name = ddoc.to_dict().get('name')
-                if dept_name:  # Only filter if we got a valid department name
-                    q = q.where('department', '==', dept_name)
-        
-        # Only apply event filter if provided
-        if event_name and event_name.strip():
-            q = q.where('event', '==', event_name)
+    # Previously we required either an event or a department filter to avoid exporting the entire database.
+    # Allow exporting all participants when no filter is provided — users requested full exports.
 
-        print(f"Executing query for participants...")
-        docs = list(q.stream())
-        print(f"Found {len(docs)} participants")
-        
-        for doc in docs:
-            data = doc.to_dict() or {}
-            participants.append({
-                'name': data.get('name', ''),
-                'event': data.get('event', ''),
-                'college': data.get('college', ''),
-                'branch': _get_branch(data),
-                'year': data.get('year', ''),
-                'email': data.get('email', ''),
-                'phone': data.get('phone', ''),
-                # robust transaction id lookup
-                'transaction_id': data.get('transactionId') or data.get('transaction_id') or data.get('txid') or data.get('transaction') or ''
-            })
+    # Collect participants using the same logic as the view so exports match the table
+    try:
+        participants = _collect_view_participants(selected_dept_id=dept_id, selected_event_id=event_name)
     except Exception as e:
         return str(e), 500
+
+    # Debugging: show how many participants were fetched and a small sample to help diagnose empty exports
+    try:
+        print(f"Participants fetched for export: {len(participants)}")
+        for i, samp in enumerate(participants[:3]):
+            print(f" Sample {i+1}: name={samp.get('name')!r}, email={samp.get('email')!r}, event={samp.get('event')!r}")
+    except Exception:
+        # ignore any logging errors
+        pass
 
     # Column order should match the page exactly
     export_headers = ['Name', 'Event', 'College', 'Branch', 'Year', 'Email', 'Phone', 'Transaction ID']
@@ -969,7 +999,7 @@ def download_participants():
             for row_idx, p in enumerate(participants, start=2):
                 row_vals = [
                     p.get('name', ''),
-                    p.get('event', ''),
+                    p.get('event_name', ''),
                     p.get('college', ''),
                     p.get('branch', ''),
                     p.get('year', ''),
@@ -1026,7 +1056,7 @@ def download_participants():
             for p in participants:
                 row = [
                     p.get('name', ''),
-                    p.get('event', ''),
+                    p.get('event_name', ''),
                     p.get('college', ''),
                     p.get('branch', ''),
                     p.get('year', ''),
@@ -1117,11 +1147,9 @@ def export_participants():
 
     Query params: dept_id, event_id (optional), format (csv|xlsx|pdf)
     """
-    if 'username' not in session:
-        return redirect(url_for('login'))
-        
     dept_id = request.args.get('dept_id')
-    event_id = request.args.get('event_id')
+    # Accept either 'event_id' (view uses it) or 'event' (legacy). Treat either as the event name filter.
+    event_id = request.args.get('event_id') or request.args.get('event')
     fmt = request.args.get('format', 'xlsx').lower()
     
     print(f"Exporting participants - dept_id: {dept_id}, event_id: {event_id}, format: {fmt}")
@@ -1154,40 +1182,8 @@ def export_participants():
             # assume event_id is a name string
             event_name = event_id
 
-    # Build participant rows directly from participants collection (matches view)
-    q = db.collection('participants')
-    
-    # Only apply filters if they are provided
-    if dept_name and dept_name.strip():
-        print(f"Filtering by department: {dept_name}")
-        q = q.where('department', '==', dept_name)
-    if event_name and event_name.strip():
-        print(f"Filtering by event: {event_name}")
-        q = q.where('event', '==', event_name)
-        
-    rows = []
-    print("Fetching participants data...")
-    
-    docs = list(q.stream())  # Convert to list to check if empty
-    if not docs:
-        print("No participants found with the current filters")
-    
-    for doc in docs:
-        p = doc.to_dict()
-        if not p:  # Skip if document is empty
-            continue
-        print(f"Found participant: {p.get('name', 'Unknown')}")
-        rows.append({
-            'name': p.get('name', ''),
-            'email': p.get('email', ''),
-            'phone': p.get('phone', ''),
-            'college': p.get('college', ''),
-            'branch': _get_branch(p),
-            'year': p.get('year', ''),
-            'event_name': p.get('event', ''),
-            'dept_name': p.get('department', ''),
-            'transaction_id': p.get('transactionId') or p.get('transaction_id', '')
-        })
+    # Collect rows using the same logic as the view/table
+    rows = _collect_view_participants(selected_dept_id=dept_id, selected_event_id=event_id)
 
     # Sort
     rows = sorted(rows, key=lambda r: (r.get('dept_name', ''), r.get('event_name', ''), r.get('name', '')))
