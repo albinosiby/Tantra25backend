@@ -908,6 +908,8 @@ def download_participants():
     event_name = request.args.get('event')
     format_type = request.args.get('format', 'xlsx')
     dept_id = request.args.get('dept_id')
+    
+    print(f"Downloading participants - event: {event_name}, format: {format_type}, dept_id: {dept_id}")
 
     # Require either an event or a department filter to avoid exporting the entire database
     if not event_name and not dept_id:
@@ -1118,6 +1120,8 @@ def export_participants():
     dept_id = request.args.get('dept_id')
     event_id = request.args.get('event_id')
     fmt = request.args.get('format', 'xlsx').lower()
+    
+    print(f"Exporting participants - dept_id: {dept_id}, event_id: {event_id}, format: {fmt}")
 
     # Helper to sanitize filename parts
     def _sanitize(s: str) -> str:
@@ -1150,12 +1154,16 @@ def export_participants():
     # Build participant rows directly from participants collection (matches view)
     q = db.collection('participants')
     if dept_name:
+        print(f"Filtering by department: {dept_name}")
         q = q.where('department', '==', dept_name)
     if event_name:
+        print(f"Filtering by event: {event_name}")
         q = q.where('event', '==', event_name)
     rows = []
+    print("Fetching participants data...")
     for doc in q.stream():
         p = doc.to_dict()
+        print(f"Found participant: {p.get('name', 'Unknown')}")
         rows.append({
             'name': p.get('name', ''),
             'email': p.get('email', ''),
@@ -1183,10 +1191,12 @@ def export_participants():
             import pandas as pd
         except Exception:
             return Response('pandas is required to export XLSX. Install with `pip install pandas openpyxl`', status=500)
+        print(f"Creating Excel file with {len(rows)} rows")
         df = pd.DataFrame(rows)
         for h in headers:
             if h not in df.columns:
                 df[h] = ''
+        print("DataFrame created successfully")
         buf = io.BytesIO()
         df.to_excel(buf, index=False)
         buf.seek(0)
