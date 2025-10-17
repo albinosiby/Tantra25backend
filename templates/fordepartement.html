@@ -51,11 +51,19 @@
                   </div>
                   <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
                     <div>
-                      {% if e.status == 1 %}
-                        <span class="badge" style="background:linear-gradient(135deg, var(--success), #00c853);color:#001"><i class="fas fa-check-circle"></i> Open</span>
-                      {% else %}
-                        <span class="badge" style="background:linear-gradient(135deg, var(--danger), #ff2b55);"><i class="fas fa-times-circle"></i> Closed</span>
-                      {% endif %}
+                      <span class="event-status-badge" data-event="{{ e.id }}">
+                        {% if e.status == 'open' %}
+                          <span class="badge" style="background:linear-gradient(135deg, var(--success), #00c853);color:#001"><i class="fas fa-check-circle"></i> Open</span>
+                        {% else %}
+                          <span class="badge" style="background:linear-gradient(135deg, var(--danger), #ff2b55);"><i class="fas fa-times-circle"></i> Closed</span>
+                        {% endif %}
+                      </span>
+                    </div>
+                    <div>
+                      <label style="display:inline-flex;align-items:center;gap:8px">
+                        <input type="checkbox" class="event-toggle" data-event="{{ e.id }}" {{ 'checked' if e.status == 'open' else '' }} />
+                        <span class="small">{{ 'Open' if e.status == 'open' else 'Closed' }}</span>
+                      </label>
                     </div>
                     <div style="color:var(--muted);font-size:13px">Participants: <strong>{{ e.participant_count }}</strong></div>
                   </div>
@@ -66,5 +74,35 @@
         </div>
       </div>
     </div>
+    <script>
+      // Attach toggle handlers for department events
+      document.querySelectorAll('.event-toggle').forEach(cb => {
+        cb.addEventListener('change', function(){
+          const evt = this.dataset.event;
+          const label = this.nextElementSibling;
+          const badgeWrap = document.querySelector('.event-status-badge[data-event="' + evt + '"]');
+          const isChecked = this.checked;
+          if (label) label.innerText = isChecked ? 'Open' : 'Closed';
+          if (badgeWrap) badgeWrap.innerHTML = isChecked ? '<span class="badge" style="background:linear-gradient(135deg, var(--success), #00c853);color:#001"><i class="fas fa-check-circle"></i> Open</span>' : '<span class="badge" style="background:linear-gradient(135deg, var(--danger), #ff2b55);"><i class="fas fa-times-circle"></i> Closed</span>';
+
+          fetch('/toggle_event_status', {
+            method: 'POST',
+            headers: {'Content-Type':'application/x-www-form-urlencoded'},
+            body: `event_id=${encodeURIComponent(evt)}`
+          }).then(async res => {
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to toggle status');
+            const open = data.status === 'open';
+            if (label) label.innerText = open ? 'Open' : 'Closed';
+            if (badgeWrap) badgeWrap.innerHTML = open ? '<span class="badge" style="background:linear-gradient(135deg, var(--success), #00c853);color:#001"><i class="fas fa-check-circle"></i> Open</span>' : '<span class="badge" style="background:linear-gradient(135deg, var(--danger), #ff2b55);"><i class="fas fa-times-circle"></i> Closed</span>';
+          }).catch(err => {
+            alert(err.message || 'Failed to update event status');
+            this.checked = !isChecked;
+            if (label) label.innerText = this.checked ? 'Open' : 'Closed';
+            if (badgeWrap) badgeWrap.innerHTML = this.checked ? '<span class="badge" style="background:linear-gradient(135deg, var(--success), #00c853);color:#001"><i class="fas fa-check-circle"></i> Open</span>' : '<span class="badge" style="background:linear-gradient(135deg, var(--danger), #ff2b55);"><i class="fas fa-times-circle"></i> Closed</span>';
+          });
+        });
+      });
+    </script>
   </body>
 </html>

@@ -109,6 +109,27 @@ def _get_branch(obj: dict) -> str:
         return ''
     return (obj.get('branch/Class') or obj.get('branch') or obj.get('Class') or obj.get('branch_name') or '')
 
+
+def _normalize_status(val) -> str:
+    """Normalize a status value from the database or incoming form to a string 'open' or 'close'.
+
+    Handles numeric (1/0 or '1'/'0'), legacy values 'open'/'closed' and returns 'open' by default.
+    """
+    if val is None:
+        return 'open'
+    try:
+        # numeric-like
+        if isinstance(val, int):
+            return 'open' if val == 1 else 'close'
+        s = str(val).strip().lower()
+        if s in ('1', 'open', 'opened', 'true', 'yes'):
+            return 'open'
+        if s in ('0', 'close', 'closed', 'false', 'no'):
+            return 'close'
+    except Exception:
+        pass
+    return 'open'
+
 # -------------------- Upload folders --------------------
 UPLOAD_QR_FOLDER = 'static/qr'
 UPLOAD_EVENT_FOLDER = 'static/event_images'
@@ -343,7 +364,7 @@ def department_dashboard():
             ev_dept = ev.get('department') or ev.get('dept_id') or ''
             if ev_dept == department_id:
                 ev_name = ev.get('name') or ''
-                ev_status = ev.get('status', None)
+                ev_status = _normalize_status(ev.get('status'))
                 ev_count = event_counts.get(ev_name, 0)
                 events_info.append({'id': edoc.id, 'name': ev_name, 'status': ev_status, 'participant_count': ev_count})
     except Exception:
@@ -354,9 +375,7 @@ def department_dashboard():
         if any(e['name'] == ename for e in events_info):
             continue
         if ename:
-            events_info.append({'id': '', 'name': ename, 'status': None, 'participant_count': cnt})
-
-    # Sort events_info by name
+            events_info.append({'id': '', 'name': ename, 'status': None, 'participant_count': cnt})    # Sort events_info by name
     events_info = sorted(events_info, key=lambda e: (e.get('name') or '').lower())
 
     return render_template('fordepartement.html', username=username, department_id=department_id,
@@ -417,7 +436,7 @@ def index():
             # show the department name when known, otherwise show the raw dept id
             'dept_name': dept_map.get(did, (did or '')),
             'date': ed.get('date'),
-            'status': ed.get('status', 1),
+            'status': _normalize_status(ed.get('status')),
             # participant count (match by event name)
             'participant_count': event_counts_map.get(ed.get('name') or '', 0)
         })
@@ -455,7 +474,7 @@ def dept_events(dept_id):
             'id': e.id,
             'name': ed.get('name'),
             'date': ed.get('date'),
-            'status': ed.get('status', 1),
+            'status': _normalize_status(ed.get('status')),
             'image_url': ed.get('image_url', ''),
             'venue': ed.get('venue', ''),
             'department': ed.get('department', '')
@@ -480,8 +499,8 @@ def get_event(event_id):
         'time': ed.get('time', ''),
         'venue': ed.get('venue', ''),
         'image_url': ed.get('image_url', ''),
-        'status': ed.get('status', 1),
-        'department': ed.get('department', ''),
+    'department': ed.get('department', ''),
+    'status': _normalize_status(ed.get('status')),
         'price': ed.get('price', ''),
         'prize': ed.get('prize', '')
     }
@@ -560,11 +579,8 @@ def add_event():
         dept_doc = db.collection('departments').document(dept_id).get() if dept_id else None
             # No payment_qr_url needed
 
-        # status: 1=open, 0=closed
-        try:
-            status = int(request.form.get('status', '1'))
-        except Exception:
-            status = 1
+        # status: use string 'open' or 'close'. Accept legacy numeric values and normalize.
+        status = _normalize_status(request.form.get('status', 'open'))
 
         price_raw = request.form.get('price', '')
         try:
@@ -611,47 +627,7 @@ def add_event():
     return render_template('add_event.html', departments=dept_list, default_date=default_date)
 
 
-@app.route('/toggle_event_status', methods=['POST'])
-def toggle_event_status():
-    """Toggle event registration status between open (1) and closed (0)."""
-    if 'username' not in session:
-        return jsonify({'error': 'Unauthorized'}), 401
 
-    event_id = request.form.get('event_id')
-    if not event_id:
-        return jsonify({'error': 'Missing event_id'}), 400
-        
-    try:
-        # Get a reference to the event document
-        event_ref = db.collection('events').document(event_id)
-        event_doc = event_ref.get()
-        
-        if not event_doc.exists:
-            return jsonify({'error': 'Event not found'}), 404
-            
-        # Get current data and new status
-        event_data = event_doc.to_dict()
-        current = event_data.get('status', 1)  # Default to 1 (open) if no status
-        new_status = 0 if current == 1 else 1
-        
-        # Update the status in Firestore
-        event_ref.update({'status': new_status})
-        
-        # Return success response with new status
-        return jsonify({
-            'success': True,
-            'message': 'Event status updated',
-            'status': new_status,
-            'is_open': new_status == 1
-        })
-        
-    except Exception as e:
-        # Log the error and return error response
-        print(f"Error toggling event status: {str(e)}")
-        return jsonify({
-            'error': 'Failed to update event status',
-            'details': str(e)
-        }), 500
 
 
 @app.route('/delete_event', methods=['POST'])
@@ -692,6 +668,39 @@ def delete_event():
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/toggle_event_status', methods=['POST'])
+def toggle_event_status():
+    """Toggle event registration status between 'open' and 'close'.
+
+    Expects form-encoded POST with 'event_id'. Requires logged-in session user.
+    Flips string status ('open'->'close' or 'close'->'open') and persists to Firestore.
+    Returns JSON with the new status string and boolean is_open.
+    """
+    if 'username' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    event_id = request.form.get('event_id') or request.json and request.json.get('event_id')
+    if not event_id:
+        return jsonify({'error': 'Missing event_id'}), 400
+
+    try:
+        event_ref = db.collection('events').document(event_id)
+        ev = event_ref.get()
+        if not ev.exists:
+            return jsonify({'error': 'Event not found'}), 404
+
+        data = ev.to_dict() or {}
+        current = _normalize_status(data.get('status'))
+        new_status = 'close' if current == 'open' else 'open'
+        event_ref.update({'status': new_status})
+
+        return jsonify({'success': True, 'status': new_status, 'is_open': new_status == 'open'})
+
+    except Exception as e:
+        print('Error toggling event status:', e)
+        return jsonify({'error': 'Failed to update event status', 'details': str(e)}), 500
 
 
 def _resolve_participant_from_registration(reg_data: dict) -> Dict:
@@ -1336,4 +1345,4 @@ if __name__ == '__main__':
     # When running locally, allow PORT to be overridden (Render provides $PORT).
     port = int(os.environ.get('PORT', 5000))
     # Bind to 0.0.0.0 so Render (or other hosts) can reach the service.
-    app.run( port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=True)
