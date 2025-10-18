@@ -141,7 +141,7 @@
         
         // Update results count in search placeholder
         if (q.length > 0) {
-          search.setAttribute('data-results', `${visibleCount} results`);
+          search.setAttribute('data-results', ${visibleCount} results);
         } else {
           search.removeAttribute('data-results');
         }
@@ -228,7 +228,35 @@
           if (!resp.ok) { alert('Failed to generate PDF'); return; }
           const blob = await resp.blob();
           const url = URL.createObjectURL(blob);
-          const a = document.createElement('a'); a.href = url; a.download = 'participants_list.pdf'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+            // determine filename according to selected filters
+            const filenameBase = (function(){
+              // get department and event values from the page (hidden inputs / selects)
+              // deptSelect contains dept id; try to get the dept name from the selected option if available
+              const deptSelect = document.getElementById('deptSelect');
+              let deptName = '';
+              if (deptSelect) {
+                const opt = deptSelect.options[deptSelect.selectedIndex];
+                if (opt && opt.value) deptName = opt.text.trim();
+              }
+              // event select might be in the form with name event_id; find it by name
+              let eventName = '';
+              const eventSelect = document.querySelector('select[name="event_id"]');
+              if (eventSelect) {
+                const opt = eventSelect.options[eventSelect.selectedIndex];
+                if (opt && opt.value) eventName = opt.text.trim();
+              }
+
+              // apply rules: none -> allparticipants, dept only -> dept, event only -> event, both -> dept_event
+              if (!deptName && !eventName) return 'allparticipants';
+              if (deptName && !eventName) return deptName;
+              if (!deptName && eventName) return eventName;
+              return deptName + '_' + eventName;
+            })();
+
+            // sanitize filename: replace spaces with underscores, remove dangerous chars
+            const sanitize = s => s.replace(/\s+/g, '').replace(/[^A-Za-z0-9\-\.]/g, '');
+            const fname = sanitize(filenameBase) + '.pdf';
+            const a = document.createElement('a'); a.href = url; a.download = fname; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
         } catch(err) { alert('Error exporting PDF: '+err.message); }
       });
     }
@@ -258,7 +286,28 @@
           if (!resp.ok) { alert('Failed to generate XLSX'); return; }
           const blob = await resp.blob();
           const url = URL.createObjectURL(blob);
-          const a = document.createElement('a'); a.href = url; a.download = 'participants_list.xlsx'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+          // determine filename according to selected filters (same logic as PDF)
+          const filenameBase = (function(){
+            const deptSelect = document.getElementById('deptSelect');
+            let deptName = '';
+            if (deptSelect) {
+              const opt = deptSelect.options[deptSelect.selectedIndex];
+              if (opt && opt.value) deptName = opt.text.trim();
+            }
+            let eventName = '';
+            const eventSelect = document.querySelector('select[name="event_id"]');
+            if (eventSelect) {
+              const opt = eventSelect.options[eventSelect.selectedIndex];
+              if (opt && opt.value) eventName = opt.text.trim();
+            }
+            if (!deptName && !eventName) return 'allparticipants';
+            if (deptName && !eventName) return deptName;
+            if (!deptName && eventName) return eventName;
+            return deptName + '_' + eventName;
+          })();
+          const sanitize = s => s.replace(/\s+/g, '').replace(/[^A-Za-z0-9\-\.]/g, '');
+          const fname = sanitize(filenameBase) + '.xlsx';
+          const a = document.createElement('a'); a.href = url; a.download = fname; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
         } catch(err) { alert('Error exporting XLSX: '+err.message); }
       });
     }
