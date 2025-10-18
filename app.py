@@ -681,22 +681,7 @@ def toggle_event_status():
     if 'username' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    # Log incoming request for debugging (form, json, raw body)
-    try:
-        print('toggle_event_status: request.form=', dict(request.form))
-    except Exception:
-        print('toggle_event_status: request.form unreadable')
-    try:
-        print('toggle_event_status: request.json=', request.get_json(silent=True))
-    except Exception:
-        print('toggle_event_status: request.json unreadable')
-    try:
-        raw = request.get_data(as_text=True)
-        print('toggle_event_status: raw body=', raw[:1000])
-    except Exception:
-        print('toggle_event_status: raw body unreadable')
-    print('toggle_event_status: content-type=', request.headers.get('Content-Type'))
-
+    # Accept form-encoded or JSON payloads for event_id
     event_id = (request.form.get('event_id') or (request.get_json(silent=True) and request.get_json(silent=True).get('event_id')))
     if not event_id:
         return jsonify({'error': 'Missing event_id'}), 400
@@ -711,9 +696,6 @@ def toggle_event_status():
         data = ev.to_dict() or {}
         current = _normalize_status(data.get('status'))
         new_status = 'close' if current == 'open' else 'open'
-
-        # Log for debugging (Render logs will show these)
-        print(f"toggle_event_status: event_id={event_id} current_status={current} -> new_status={new_status} session_user={session.get('username')}")
 
         # Use a transaction to avoid race conditions and ensure update occurs
         try:
@@ -736,12 +718,7 @@ def toggle_event_status():
                 print('toggle_event_status: update failed:', uex)
                 return jsonify({'error': 'Failed to update event status', 'details': str(uex)}), 500
 
-        # Read back and verify
-        ev_after = event_ref.get()
-        after_data = ev_after.to_dict() if ev_after.exists else {}
-        print(f"toggle_event_status: after update doc={after_data}")
-
-        return jsonify({'success': True, 'status': new_status, 'is_open': new_status == 'open', 'doc': after_data})
+        return jsonify({'success': True, 'status': new_status, 'is_open': new_status == 'open'})
 
     except Exception as e:
         print('Error toggling event status:', e)
