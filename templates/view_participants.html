@@ -5,15 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>View Participants - Premium Admin</title>
 <link rel="stylesheet" href="/static/css/admin.css" />
-<link rel="icon" href="{{ url_for('static', filename='images/log.png') }}" type="image/png">
+<link rel="icon" href="{{ url_for('static', filename='logos/log.png') }}" type="image/png">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
   <div class="container floating">
     <div class="header">
       <div class="brand">
-        <div class="logo pulse"><i class="fas fa-users"></i></div>
-        <div>
+<img src="{{ url_for('static', filename='logos/log.png') }}" alt="Logo" style="width: 40px; height: 40px;">        <div>
           <h1>Tantra Admin</h1>
           <div class="small">Manage registered participants</div>
         </div>
@@ -71,8 +70,8 @@
       <div class="toolbar">
         <div class="left">
           <a href="/view_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}" class="btn btn-ghost"><i class="fas fa-sync-alt"></i> Refresh</a>
-          <a href="/export_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}&format=xlsx" class="btn btn-success"><i class="fas fa-file-excel"></i> Download XLSX</a>
-          <a href="/export_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}&format=pdf" class="btn btn-primary"><i class="fas fa-file-pdf"></i> Download PDF</a>
+          <button id="serverExportXlsxBtn" class="btn btn-success"><i class="fas fa-file-excel"></i> Download XLSX</button>
+          <button id="serverExportPdfBtn" class="btn btn-primary"><i class="fas fa-file-pdf"></i> Download PDF</button>
         </div>
       </div>
       {% endif %}
@@ -179,6 +178,56 @@
             this.disabled = false;
           }, 2000);
         });
+      });
+    }
+
+    // Helper: collect visible table headers and rows (as arrays of strings)
+    function getVisibleTableData() {
+      const headers = Array.from(document.querySelectorAll('#participantsTable thead th'))
+        .map(th => th.innerText.replace(/[^\w \-]/g, '').trim());
+      const rows = [];
+      document.querySelectorAll('#participantsTable tbody tr').forEach(tr => {
+        if (tr.style.display === 'none') return;
+        const cells = Array.from(tr.cells).map(td => td.innerText.trim());
+        rows.push(cells);
+      });
+      return { headers, rows };
+    }
+
+    // Server-backed visible exports: POST visible rows to server to generate PDF/XLSX
+    const serverExportPdfBtn = document.getElementById('serverExportPdfBtn');
+    if (serverExportPdfBtn) {
+      serverExportPdfBtn.addEventListener('click', async function(e){
+        e.preventDefault();
+        const { headers, rows } = getVisibleTableData();
+        try {
+          const resp = await fetch('/export_visible_pdf', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ headers: headers, rows: rows, title: 'Participants' })
+          });
+          if (!resp.ok) { alert('Failed to generate PDF'); return; }
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href = url; a.download = 'participants_visible_server.pdf'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+        } catch(err) { alert('Error exporting PDF: '+err.message); }
+      });
+    }
+
+    const serverExportXlsxBtn = document.getElementById('serverExportXlsxBtn');
+    if (serverExportXlsxBtn) {
+      serverExportXlsxBtn.addEventListener('click', async function(e){
+        e.preventDefault();
+        const { headers, rows } = getVisibleTableData();
+        try {
+          const resp = await fetch('/export_visible_xlsx', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ headers: headers, rows: rows, title: 'Participants' })
+          });
+          if (!resp.ok) { alert('Failed to generate XLSX'); return; }
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href = url; a.download = 'participants_visible_server.xlsx'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+        } catch(err) { alert('Error exporting XLSX: '+err.message); }
       });
     }
   </script>
