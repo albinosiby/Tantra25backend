@@ -681,10 +681,14 @@ def toggle_event_status():
     if 'username' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    # Accept form-encoded or JSON payloads for event_id
-    event_id = (request.form.get('event_id') or (request.get_json(silent=True) and request.get_json(silent=True).get('event_id')))
+    # Accept form-encoded or JSON payloads for event_id and optional status
+    body_json = request.get_json(silent=True) or {}
+    event_id = request.form.get('event_id') or body_json.get('event_id')
     if not event_id:
         return jsonify({'error': 'Missing event_id'}), 400
+    # optional explicit status: 'open' or 'close' (or equivalents)
+    requested_status_raw = request.form.get('status') or body_json.get('status')
+    requested_status = _normalize_status(requested_status_raw) if requested_status_raw is not None else None
 
     try:
         event_ref = db.collection('events').document(event_id)
@@ -695,7 +699,11 @@ def toggle_event_status():
 
         data = ev.to_dict() or {}
         current = _normalize_status(data.get('status'))
-        new_status = 'close' if current == 'open' else 'open'
+        # If client provided a requested_status, use it; otherwise toggle
+        if requested_status:
+            new_status = requested_status
+        else:
+            new_status = 'close' if current == 'open' else 'open'
 
         # Use a transaction to avoid race conditions and ensure update occurs
         try:
