@@ -681,7 +681,23 @@ def toggle_event_status():
     if 'username' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    event_id = request.form.get('event_id') or request.json and request.json.get('event_id')
+    # Log incoming request for debugging (form, json, raw body)
+    try:
+        print('toggle_event_status: request.form=', dict(request.form))
+    except Exception:
+        print('toggle_event_status: request.form unreadable')
+    try:
+        print('toggle_event_status: request.json=', request.get_json(silent=True))
+    except Exception:
+        print('toggle_event_status: request.json unreadable')
+    try:
+        raw = request.get_data(as_text=True)
+        print('toggle_event_status: raw body=', raw[:1000])
+    except Exception:
+        print('toggle_event_status: raw body unreadable')
+    print('toggle_event_status: content-type=', request.headers.get('Content-Type'))
+
+    event_id = (request.form.get('event_id') or (request.get_json(silent=True) and request.get_json(silent=True).get('event_id')))
     if not event_id:
         return jsonify({'error': 'Missing event_id'}), 400
 
@@ -689,14 +705,43 @@ def toggle_event_status():
         event_ref = db.collection('events').document(event_id)
         ev = event_ref.get()
         if not ev.exists:
+            print(f"toggle_event_status: event {event_id} not found")
             return jsonify({'error': 'Event not found'}), 404
 
         data = ev.to_dict() or {}
         current = _normalize_status(data.get('status'))
         new_status = 'close' if current == 'open' else 'open'
-        event_ref.update({'status': new_status})
 
-        return jsonify({'success': True, 'status': new_status, 'is_open': new_status == 'open'})
+        # Log for debugging (Render logs will show these)
+        print(f"toggle_event_status: event_id={event_id} current_status={current} -> new_status={new_status} session_user={session.get('username')}")
+
+        # Use a transaction to avoid race conditions and ensure update occurs
+        try:
+            transaction = db.transaction()
+            @firestore.transactional
+            def _txn_update(tx, ref, ns):
+                snap = ref.get(transaction=tx)
+                if not snap.exists:
+                    raise RuntimeError('Event vanished during transaction')
+                tx.update(ref, {'status': ns})
+
+            # Run transaction
+            _txn_update(transaction, event_ref, new_status)
+        except Exception as txe:
+            # Fallback to single update but log the error
+            print('toggle_event_status: transaction failed:', txe)
+            try:
+                event_ref.update({'status': new_status})
+            except Exception as uex:
+                print('toggle_event_status: update failed:', uex)
+                return jsonify({'error': 'Failed to update event status', 'details': str(uex)}), 500
+
+        # Read back and verify
+        ev_after = event_ref.get()
+        after_data = ev_after.to_dict() if ev_after.exists else {}
+        print(f"toggle_event_status: after update doc={after_data}")
+
+        return jsonify({'success': True, 'status': new_status, 'is_open': new_status == 'open', 'doc': after_data})
 
     except Exception as e:
         print('Error toggling event status:', e)
