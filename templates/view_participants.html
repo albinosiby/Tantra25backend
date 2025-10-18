@@ -66,15 +66,21 @@
           </label>
         </div>
       </form>
+      {% endif %}
 
       <div class="toolbar">
         <div class="left">
           <a href="/view_participants?dept_id={{ selected_dept_id }}&event_id={{ selected_event_id }}" class="btn btn-ghost"><i class="fas fa-sync-alt"></i> Refresh</a>
+          {% if participants %}
+          <label style="margin-left:12px; display:inline-flex; align-items:center; gap:8px; font-size:14px;">
+            <input type="checkbox" id="downloadSortByEvent" />
+            <span>Sort downloaded file by Event</span>
+          </label>
           <button id="serverExportXlsxBtn" class="btn btn-success"><i class="fas fa-file-excel"></i> Download XLSX</button>
           <button id="serverExportPdfBtn" class="btn btn-primary"><i class="fas fa-file-pdf"></i> Download PDF</button>
+          {% endif %}
         </div>
       </div>
-      {% endif %}
 
       {% if participants %}
       <div class="table-wrap">
@@ -199,7 +205,21 @@
     if (serverExportPdfBtn) {
       serverExportPdfBtn.addEventListener('click', async function(e){
         e.preventDefault();
-        const { headers, rows } = getVisibleTableData();
+        const { headers, rows: rawRows } = getVisibleTableData();
+        // clone rows before mutating
+        const rows = rawRows.slice();
+        // if the user requested sorting by event for the downloaded file, sort client-side by the Event column
+        try {
+          const sortByEvent = document.getElementById('downloadSortByEvent')?.checked;
+          if (sortByEvent) {
+            const idx = headers.findIndex(h => /event/i.test(h));
+            if (idx >= 0) {
+              rows.sort((a,b) => ((a[idx]||'').toString().toLowerCase()).localeCompare((b[idx]||'').toString().toLowerCase()));
+            }
+          }
+        } catch (err) {
+          console.warn('Failed to sort rows before PDF export', err);
+        }
         try {
           const resp = await fetch('/export_visible_pdf', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -208,7 +228,7 @@
           if (!resp.ok) { alert('Failed to generate PDF'); return; }
           const blob = await resp.blob();
           const url = URL.createObjectURL(blob);
-          const a = document.createElement('a'); a.href = url; a.download = 'participants_visible_server.pdf'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+          const a = document.createElement('a'); a.href = url; a.download = 'participants_list.pdf'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
         } catch(err) { alert('Error exporting PDF: '+err.message); }
       });
     }
@@ -217,7 +237,19 @@
     if (serverExportXlsxBtn) {
       serverExportXlsxBtn.addEventListener('click', async function(e){
         e.preventDefault();
-        const { headers, rows } = getVisibleTableData();
+        const { headers, rows: rawRows } = getVisibleTableData();
+        const rows = rawRows.slice();
+        try {
+          const sortByEvent = document.getElementById('downloadSortByEvent')?.checked;
+          if (sortByEvent) {
+            const idx = headers.findIndex(h => /event/i.test(h));
+            if (idx >= 0) {
+              rows.sort((a,b) => ((a[idx]||'').toString().toLowerCase()).localeCompare((b[idx]||'').toString().toLowerCase()));
+            }
+          }
+        } catch (err) {
+          console.warn('Failed to sort rows before XLSX export', err);
+        }
         try {
           const resp = await fetch('/export_visible_xlsx', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -226,7 +258,7 @@
           if (!resp.ok) { alert('Failed to generate XLSX'); return; }
           const blob = await resp.blob();
           const url = URL.createObjectURL(blob);
-          const a = document.createElement('a'); a.href = url; a.download = 'participants_visible_server.xlsx'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+          const a = document.createElement('a'); a.href = url; a.download = 'participants_list.xlsx'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
         } catch(err) { alert('Error exporting XLSX: '+err.message); }
       });
     }
